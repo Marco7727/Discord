@@ -1,21 +1,17 @@
 # ==== main.py ==========================================================
-import discord, os, io, json, re, asyncio, datetime, unicodedata
+import discord, os, io, json, re, asyncio, datetime
 from discord.ext import commands
 from discord.ui import View, button
-from aiohttp import web   # solo si usas keep-alive (Railway / Render)
+from aiohttp import web
 
-# ────────────────────────────
-# CONFIGURACIÓN
-# ────────────────────────────
 PROHIBITED_WORDS = {"hack", "cheat", "palabramala"}
-WARN_LIMIT       = 3
+WARN_LIMIT       = 6
 MUTE_ROLE_NAME   = "Muted"
 SOPORTE_ROLE     = "Soporte"
 WARN_PATH        = "warns.json"
+TICKET_COUNTER_PATH = "ticket_counter.json"      # ← nuevo
 
-# ────────────────────────────
-# FUNCIONES AUXILIARES (warns, colores… sin cambios)
-# ────────────────────────────
+# ─── helpers warn/colores (sin cambios) ───────────────────────────────
 def load_warns():
     if not os.path.exists(WARN_PATH):
         with open(WARN_PATH, "w") as f:
@@ -45,23 +41,30 @@ def parse_color(value: str | None):
     m = HEX.match(value.strip())
     return discord.Color(int(m.group(1), 16)) if m else discord.Color.random()
 
-# ────────────────────────────
-# INTENTS Y BOT
-# ────────────────────────────
+# ─── contador persistente ─────────────────────────────────────────────
+def load_counter() -> int:
+    if not os.path.exists(TICKET_COUNTER_PATH):
+        with open(TICKET_COUNTER_PATH, "w") as f:
+            json.dump({"last": 0}, f)
+            return 0
+    with open(TICKET_COUNTER_PATH) as f:
+        return json.load(f).get("last", 0)
+
+def save_counter(n: int):
+    with open(TICKET_COUNTER_PATH, "w") as f:
+        json.dump({"last": n}, f)
+
+# ─── bot / intents ────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ────────────────────────────
-# EVENTOS BÁSICOS
-# ────────────────────────────
 @bot.event
 async def on_ready():
     print(f"✅ Conectado como {bot.user}")
     try:
-        synced = await bot.tree.sync()
-        print(f"🌐 Slash commands sincronizados ({len(synced)})")
+        await bot.tree.sync()
     except Exception as e:
         print("Sync falló:", e)
 
@@ -71,15 +74,12 @@ async def on_member_join(member):
     if canal:
         await canal.send(f"👋 ¡Bienvenido/a {member.mention} a Leleboxpvp!")
 
-# ────────────────────────────
-# AUTOMOD (igual que antes)
-# ────────────────────────────
+# ─── automod (igual que antes) ────────────────────────────────────────
 @bot.event
-async def on_message(msg: discord.Message):
+async def on_message(msg):
     await bot.process_commands(msg)
     if msg.author.bot:
         return
-    # palabras prohibidas …
     if any(p in msg.content.lower() for p in PROHIBITED_WORDS):
         await msg.delete()
         total = add_warn(msg.author.id, bot.user.id, "Palabra prohibida")
@@ -88,7 +88,6 @@ async def on_message(msg: discord.Message):
             delete_after=5
         )
         return
-    # anti-spam …
     now = datetime.datetime.utcnow().timestamp()
     cache = getattr(msg.author, "_spam", [])
     cache.append((now, msg.content))
@@ -102,47 +101,32 @@ async def on_message(msg: discord.Message):
             delete_after=5
         )
 
-# ────────────────────────────
-# SISTEMA DE TICKETS
-# ────────────────────────────
-_RE_TICKET_NUM = re.compile(r"^ticket-(\d+)$")
-TICKET_LOCK = asyncio.Lock()    # evita colisiones al numerar
+# ─── tickets ──────────────────────────────────────────────────────────
+TICKET_LOCK = asyncio.Lock()
 
-def usuario_ya_tiene_ticket(guild: discord.Guild, member: discord.Member) -> bool:
-    """True si ya existe un canal de ticket que el usuario puede ver."""
+def usuario_ya_tiene_ticket(guild, member):
     for ch in guild.text_channels:
         if ch.name.startswith("ticket-") and ch.overwrites_for(member).view_channel:
             return True
     return False
-
-def siguiente_numero_ticket(guild: discord.Guild) -> int:
-    """Devuelve 1 + mayor número existente (o 1 si no hay ninguno)."""
-    nums = [
-        int(m.group(1))
-        for ch in guild.text_channels
-        if (m := _RE_TICKET_NUM.match(ch.name))
-    ]
-    return max(nums, default=0) + 1
 
 class CloseView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @button(label="❌ Cerrar Ticket", style=discord.ButtonStyle.red, custom_id="ticket_close")
-    async def close(self, interaction: discord.Interaction, _):
+    async def close(self, interaction, _):
         soporte = discord.utils.get(interaction.guild.roles, name=SOPORTE_ROLE)
         if soporte not in interaction.user.roles:
-            await interaction.response.send_message(
-                "🚫 Solo Soporte puede cerrar el ticket.", ephemeral=True)
+            await interaction.response.send_message("🚫 Solo Soporte puede cerrar el ticket.", ephemeral=True)
             return
 
         channel = interaction.channel
         log_channel = discord.utils.get(channel.guild.text_channels, name="logs")
 
-        # historial
         msgs = [m async for m in channel.history(limit=None, oldest_first=True)]
         texto = "\n".join(
-            f"[{m.created_at}] {m.author.display_name} ({m.author.id}): {m.content or '[Embed/Adjunto]'}"
+            f"[{m.created_at}] {m.author.display_name}: {m.content or '[Embed/Adjunto]'}"
             for m in msgs
         )
         file = discord.File(io.BytesIO(texto.encode()), filename=f"{channel.name}.txt")
@@ -152,7 +136,6 @@ class CloseView(View):
                 f"📁 Ticket cerrado por {interaction.user.mention} - `{channel.name}`",
                 file=file
             )
-
         await channel.delete()
 
 class TicketView(View):
@@ -160,24 +143,24 @@ class TicketView(View):
         super().__init__(timeout=None)
 
     @button(label="🎟️ Abrir Ticket", style=discord.ButtonStyle.green, custom_id="ticket_open")
-    async def open_ticket(self, interaction: discord.Interaction, _):
+    async def open_ticket(self, interaction, _):
         guild  = interaction.guild
         member = interaction.user
 
-        # ¿ya tiene uno?
         if usuario_ya_tiene_ticket(guild, member):
-            await interaction.response.send_message(
-                "❌ Ya tienes un ticket abierto.", ephemeral=True)
+            await interaction.response.send_message("❌ Ya tienes un ticket abierto.", ephemeral=True)
             return
 
         soporte  = discord.utils.get(guild.roles, name=SOPORTE_ROLE)
         categoria = discord.utils.get(guild.categories, name="Soporte") \
                    or await guild.create_category("Soporte")
 
-        # ── reservar número único ───────────────────────────
+        # ── número único persistente ─────────────────────────
         async with TICKET_LOCK:
-            numero = siguiente_numero_ticket(guild)       # 1, 2, 3…
+            numero = load_counter() + 1
+            save_counter(numero)
             nombre_canal = f"ticket-{numero}"
+
             canal = await guild.create_text_channel(
                 name=nombre_canal,
                 overwrites={
@@ -188,8 +171,7 @@ class TicketView(View):
                 },
                 category=categoria
             )
-        # dentro del lock para evitar duplicados
-        # ───────────────────────────────────────────────────
+        # ────────────────────────────────────────────────────
 
         embed = discord.Embed(
             title=f"Ticket #{numero}",
@@ -197,8 +179,7 @@ class TicketView(View):
             color=discord.Color.red()
         )
         await canal.send(embed=embed, view=CloseView())
-        await interaction.response.send_message(
-            f"✅ Ticket creado: {canal.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ Ticket creado: {canal.mention}", ephemeral=True)
 
 @bot.command()
 async def setup(ctx):
@@ -209,31 +190,18 @@ async def setup(ctx):
     )
     await ctx.send(embed=embed, view=TicketView())
 
-# ────────────────────────────
-# COMANDOS DE MODERACIÓN (igual que antes)
-# ────────────────────────────
-# … ban, kick, warn, mute, unmute, embed …
-
-# ────────────────────────────
-# VISTAS PERSISTENTES
-# ────────────────────────────
+# ─── vistas persistentes y arranque (igual) ───────────────────────────
 @bot.event
 async def setup_hook():
     bot.add_view(TicketView())
     bot.add_view(CloseView())
-
-    # (opcional) web keep-alive
     async def _web():
         app = web.Application()
         app.add_routes([web.get("/", lambda _: web.Response(text="Bot activo."))])
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", 3000)
-        await site.start()
+        await web.TCPSite(runner, "0.0.0.0", 3000).start()
     bot.loop.create_task(_web())
 
-# ────────────────────────────
-# ARRANQUE
-# ────────────────────────────
 bot.run(os.getenv("TOKEN"))
 # ======================================================================
