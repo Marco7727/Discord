@@ -12,7 +12,7 @@ from aiohttp import web   # ⇠ solo si usas keep-alive (Railway / Render)
 # CONFIGURACIÓN
 # ────────────────────────────
 PROHIBITED_WORDS   = {"hack", "cheat", "palabramala"}   # edita tu lista
-WARN_LIMIT         = 3
+WARN_LIMIT         = 6
 MUTE_ROLE_NAME     = "Muted"
 SOPORTE_ROLE       = "Soporte"
 WARN_PATH          = "warns.json"
